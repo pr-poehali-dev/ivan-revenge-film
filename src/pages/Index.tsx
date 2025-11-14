@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
@@ -7,6 +7,8 @@ import Icon from '@/components/ui/icon';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/hooks/use-toast';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { videoGenerator } from '@/lib/videoGenerator';
 
 interface VideoGeneration {
   id: string;
@@ -14,6 +16,8 @@ interface VideoGeneration {
   status: 'processing' | 'completed' | 'failed';
   progress: number;
   thumbnail: string;
+  videoUrl?: string;
+  photos?: string[];
   createdAt: Date;
 }
 
@@ -22,6 +26,8 @@ export default function Index() {
   const [description, setDescription] = useState('');
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [watchingVideo, setWatchingVideo] = useState<VideoGeneration | null>(null);
+  const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [generations, setGenerations] = useState<VideoGeneration[]>([
     {
       id: '1',
@@ -29,6 +35,12 @@ export default function Index() {
       status: 'completed',
       progress: 100,
       thumbnail: 'https://images.unsplash.com/photo-1478720568477-152d9b164e26?w=400',
+      videoUrl: 'https://images.unsplash.com/photo-1478720568477-152d9b164e26?w=1200',
+      photos: [
+        'https://images.unsplash.com/photo-1478720568477-152d9b164e26?w=1200',
+        'https://images.unsplash.com/photo-1514933651103-005eec06c04b?w=1200',
+        'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=1200'
+      ],
       createdAt: new Date('2024-11-13')
     },
     {
@@ -41,8 +53,9 @@ export default function Index() {
     }
   ]);
   const { toast } = useToast();
+  const photoIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     if (!description.trim()) {
       toast({
         title: 'Ошибка',
@@ -65,33 +78,58 @@ export default function Index() {
 
     setGenerations([newGeneration, ...generations]);
 
-    let progress = 0;
-    const interval = setInterval(() => {
-      progress += Math.random() * 15;
-      if (progress >= 100) {
-        progress = 100;
-        clearInterval(interval);
-        setIsGenerating(false);
+    try {
+      const result = await videoGenerator.generateFilm(description, (progress) => {
         setGenerations(prev => 
           prev.map(g => g.id === newGeneration.id 
-            ? { ...g, status: 'completed', progress: 100 } 
+            ? { ...g, progress: Math.min(progress, 100) } 
             : g
           )
         );
-        toast({
-          title: 'Готово!',
-          description: 'Ваш фильм успешно создан'
-        });
-      }
+      });
+
+      const photos = await Promise.all(
+        result.analysis.scenes.slice(0, 5).map(async (scene) => {
+          const character = result.analysis.characters.find(c => scene.characters.includes(c.name));
+          const scenePhotos = await videoGenerator.searchPhotos(scene, character);
+          return scenePhotos[0] || result.videoUrl;
+        })
+      );
+
       setGenerations(prev => 
         prev.map(g => g.id === newGeneration.id 
-          ? { ...g, progress: Math.min(progress, 100) } 
+          ? { 
+              ...g, 
+              status: 'completed', 
+              progress: 100,
+              thumbnail: photos[0] || result.videoUrl,
+              videoUrl: result.videoUrl,
+              photos: photos
+            } 
           : g
         )
       );
-    }, 2000);
-
-    setDescription('');
+      
+      toast({
+        title: 'Готово!',
+        description: `Создан фильм "${result.analysis.title}" (${result.analysis.genre})`,
+      });
+    } catch (error) {
+      setGenerations(prev => 
+        prev.map(g => g.id === newGeneration.id 
+          ? { ...g, status: 'failed', progress: 0 } 
+          : g
+        )
+      );
+      toast({
+        title: 'Ошибка',
+        description: 'Не удалось создать фильм',
+        variant: 'destructive'
+      });
+    } finally {
+      setIsGenerating(false);
+      setDescription('');
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -343,11 +381,41 @@ export default function Index() {
                     )}
                     {gen.status === 'completed' && (
                       <div className="flex gap-2">
-                        <Button className="flex-1 bg-[#d4af37] hover:bg-[#c19d2f] text-[#0a0a0a]">
+                        <Button 
+                          onClick={() => {
+                            setWatchingVideo(gen);
+                            setCurrentPhotoIndex(0);
+                            if (photoIntervalRef.current) {
+                              clearInterval(photoIntervalRef.current);
+                            }
+                            photoIntervalRef.current = setInterval(() => {
+                              setCurrentPhotoIndex(prev => {
+                                const maxIndex = (gen.photos?.length || 1) - 1;
+                                return prev >= maxIndex ? 0 : prev + 1;
+                              });
+                            }, 3000);
+                          }}
+                          className="flex-1 bg-[#d4af37] hover:bg-[#c19d2f] text-[#0a0a0a]"
+                        >
                           <Icon name="Play" size={16} className="mr-2" />
                           Смотреть
                         </Button>
-                        <Button variant="outline" className="border-[#262626]">
+                        <Button 
+                          onClick={() => {
+                            if (gen.videoUrl) {
+                              const link = document.createElement('a');
+                              link.href = gen.videoUrl;
+                              link.download = `${gen.title}.jpg`;
+                              link.click();
+                              toast({
+                                title: 'Скачивание началось',
+                                description: 'Фильм сохраняется на ваше устройство'
+                              });
+                            }
+                          }}
+                          variant="outline" 
+                          className="border-[#262626]"
+                        >
                           <Icon name="Download" size={16} />
                         </Button>
                       </div>
@@ -473,6 +541,112 @@ export default function Index() {
           </div>
         </div>
       )}
+
+      <Dialog open={!!watchingVideo} onOpenChange={(open) => {
+        if (!open) {
+          setWatchingVideo(null);
+          if (photoIntervalRef.current) {
+            clearInterval(photoIntervalRef.current);
+          }
+        }
+      }}>
+        <DialogContent className="max-w-5xl bg-[#0a0a0a] border-[#262626]">
+          <DialogHeader>
+            <DialogTitle className="text-2xl text-[#d4af37]">{watchingVideo?.title}</DialogTitle>
+          </DialogHeader>
+          <div className="relative aspect-video bg-black rounded-lg overflow-hidden">
+            {watchingVideo?.photos && watchingVideo.photos.length > 0 ? (
+              <img 
+                src={watchingVideo.photos[currentPhotoIndex]} 
+                alt={`Сцена ${currentPhotoIndex + 1}`}
+                className="w-full h-full object-cover transition-all duration-1000 ease-in-out"
+                style={{
+                  transform: `scale(${1 + (currentPhotoIndex % 2) * 0.1})`,
+                }}
+              />
+            ) : (
+              <img 
+                src={watchingVideo?.videoUrl || watchingVideo?.thumbnail} 
+                alt="Видео"
+                className="w-full h-full object-cover"
+              />
+            )}
+            <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-6">
+              <div className="flex items-center justify-between text-white">
+                <div className="flex items-center gap-4">
+                  <Button
+                    onClick={() => {
+                      if (photoIntervalRef.current) {
+                        clearInterval(photoIntervalRef.current);
+                        photoIntervalRef.current = null;
+                      } else {
+                        photoIntervalRef.current = setInterval(() => {
+                          setCurrentPhotoIndex(prev => {
+                            const maxIndex = (watchingVideo?.photos?.length || 1) - 1;
+                            return prev >= maxIndex ? 0 : prev + 1;
+                          });
+                        }, 3000);
+                      }
+                    }}
+                    size="icon"
+                    className="bg-[#d4af37] hover:bg-[#c19d2f] text-[#0a0a0a]"
+                  >
+                    <Icon name={photoIntervalRef.current ? "Pause" : "Play"} size={20} />
+                  </Button>
+                  <span className="text-sm">
+                    Сцена {currentPhotoIndex + 1} из {watchingVideo?.photos?.length || 1}
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => {
+                      const newIndex = Math.max(0, currentPhotoIndex - 1);
+                      setCurrentPhotoIndex(newIndex);
+                    }}
+                    size="icon"
+                    variant="outline"
+                    className="border-[#d4af37] text-[#d4af37]"
+                  >
+                    <Icon name="ChevronLeft" size={20} />
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      const maxIndex = (watchingVideo?.photos?.length || 1) - 1;
+                      const newIndex = Math.min(maxIndex, currentPhotoIndex + 1);
+                      setCurrentPhotoIndex(newIndex);
+                    }}
+                    size="icon"
+                    variant="outline"
+                    className="border-[#d4af37] text-[#d4af37]"
+                  >
+                    <Icon name="ChevronRight" size={20} />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-between items-center">
+            <p className="text-gray-400 text-sm">
+              <Icon name="Film" size={16} className="inline mr-2 text-[#d4af37]" />
+              Создано {watchingVideo?.createdAt.toLocaleDateString('ru-RU')}
+            </p>
+            <Button
+              onClick={() => {
+                if (watchingVideo?.videoUrl) {
+                  const link = document.createElement('a');
+                  link.href = watchingVideo.videoUrl;
+                  link.download = `${watchingVideo.title}.jpg`;
+                  link.click();
+                }
+              }}
+              className="bg-[#d4af37] hover:bg-[#c19d2f] text-[#0a0a0a]"
+            >
+              <Icon name="Download" size={16} className="mr-2" />
+              Скачать фильм
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
